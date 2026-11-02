@@ -1,0 +1,94 @@
+version: 2
+
+models:
+  # ---------------- core ----------------
+  - name: dim_listing
+    description: One row per listing - latest attributes, lifecycle (days live, relists) and price-drop summary.
+    columns:
+      - name: listing_id
+        tests: [unique, not_null]
+      - name: days_active
+        description: Days spent in status 'activated', capped at the data snapshot.
+      - name: is_active_at_snapshot
+        description: Live at the end of the extract -> days_active is a lower bound.
+
+  - name: fct_listing_price_changes
+    description: One row per public price change with vehicle attributes at the time of change. Filter is_valid_drop for real drops.
+    columns:
+      - name: price_change_id
+        tests: [unique, not_null]
+      - name: listing_id
+        tests:
+          - not_null
+          - relationships:
+              to: ref('dim_listing')
+              field: listing_id
+
+  - name: dim_saved_search
+    description: One row per saved search with parsed filters and a readable label.
+    columns:
+      - name: saved_search_id
+        tests: [unique, not_null]
+
+  # ---------------- notifications ----------------
+  - name: fct_saved_search_price_drop_matches
+    description: (saved search x valid price drop) pairs where all supported filters match and the search was active at drop time.
+    columns:
+      - name: match_id
+        tests: [unique, not_null]
+      - name: saved_search_id
+        tests:
+          - relationships:
+              to: ref('dim_saved_search')
+              field: saved_search_id
+      - name: price_change_id
+        tests:
+          - relationships:
+              to: ref('fct_listing_price_changes')
+              field: price_change_id
+
+  - name: fct_price_drop_notifications
+    description: All candidate notifications per (user, listing, drop day) with cooldown and digest ranking. Daily export is a filter on this table.
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          combination_of_columns: ['user_id', 'listing_id', 'drop_date']
+      - dbt_utils.expression_is_true:
+          expression: "price_now < price_before"
+      - dbt_utils.expression_is_true:
+          expression: "digest_rank <= {{ var('max_listings_per_digest') }}"
+          config: {where: "is_selected_for_digest"}
+    columns:
+      - name: notification_id
+        tests: [unique, not_null]
+
+  - name: rpt_daily_price_drop_notifications
+    description: >
+      DAILY EXPORT for the messaging service: users to notify for run_date and what to show them.
+      Exported to gs://<export_bucket>/notifications/run_date=YYYY-MM-DD/ as CSV.
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          combination_of_columns: ['user_id', 'listing_id']
+      - dbt_utils.expression_is_true:
+          expression: "n_listings_in_digest <= {{ var('max_listings_per_digest') }}"
+      - dbt_utils.expression_is_true:
+          expression: "price_now_chf < price_before_chf"
+
+  # ---------------- analytics ----------------
+  - name: rpt_avg_price_drop_per_model
+    description: Q5a - average valid price drop per car model, per drop event and per listing.
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          combination_of_columns: ['make_key', 'model_key']
+
+  - name: rpt_days_on_platform
+    description: Q5b - days live on the platform; completed listings vs all (right-censored).
+
+  - name: rpt_overpriced_listings
+    description: Q5c - live cars priced > 25% above their peer-group median.
+    columns:
+      - name: listing_id
+        tests: [unique, not_null]
+      - name: price_premium_pct
+        tests:
+          - dbt_utils.expression_is_true:
+              expression: ">= {{ var('overpriced_premium_pct') }}"

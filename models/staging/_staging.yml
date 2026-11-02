@@ -1,0 +1,75 @@
+version: 2
+
+models:
+  - name: stg_listings__versions
+    description: >
+      Clean SCD2 history: one row per listing version. Types cast, empty strings -> NULL,
+      zero-length technical versions removed, invalid values nulled and flagged (raw kept in *_raw).
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          combination_of_columns: ['listing_id', 'valid_from']
+      - dbt_utils.expression_is_true:
+          expression: "valid_to > valid_from"
+    columns:
+      - name: listing_version_id
+        description: Surrogate key of (listing_id, valid_from).
+        tests: [unique, not_null]
+      - name: listing_id
+        tests: [not_null]
+      - name: valid_from
+        tests: [not_null]
+      - name: valid_to
+        description: Version end. 9999-01-01 = current version.
+        tests: [not_null]
+      - name: status
+        tests:
+          - not_null
+          - accepted_values:
+              values: ['draft', 'activated', 'deactivated', 'removed', 'deleted']
+      - name: vehicle_category
+        tests:
+          - accepted_values:
+              values: ['car', 'motorcycle', 'utility', 'camper', 'trailer', 'truck']
+      - name: seller_type
+        tests:
+          - accepted_values:
+              values: ['professional', 'private']
+      - name: condition_type
+        tests:
+          - accepted_values:
+              values: ['new', 'used', 'demonstration', 'pre-registered', 'oldtimer']
+      - name: price
+        description: Clean price in CHF. NULL when price on request, below the floor, or a placeholder.
+        tests:
+          - dbt_utils.expression_is_true:
+              expression: ">= {{ var('min_valid_price') }}"
+              config: {where: "price is not null"}
+      - name: first_registration_year
+        description: NULL when outside 1900..current year + 1.
+      - name: mileage
+        description: NULL when negative or above max_valid_mileage. Note profiling found many 'used' cars with 0 km and 'new' cars with >1000 km - mileage is not reliable enough for hard filters.
+      - name: is_price_on_request
+        description: Raw price <= 1 (platform convention for "price on request").
+
+  - name: stg_saved_searches
+    description: Saved searches parsed from the raw line; one row per search.
+    columns:
+      - name: saved_search_id
+        tests: [unique, not_null]
+      - name: user_id
+        tests: [not_null]
+      - name: created_at
+        tests: [not_null]
+      - name: deleted_at
+        description: Soft delete. Searches are matched only while active.
+        tests:
+          - dbt_utils.expression_is_true:
+              expression: ">= created_at"
+              config: {where: "deleted_at is not null"}
+      - name: is_params_invalid
+        tests:
+          - accepted_values:
+              values: [false]
+              quote: false
+      - name: unsupported_filters
+        description: Filter keys present in the search that cannot be evaluated against listings (e.g. horse_power_min). Ignored in matching.

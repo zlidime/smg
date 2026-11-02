@@ -1,0 +1,38 @@
+version: 2
+
+sources:
+  - name: raw
+    description: >
+      Raw layer. Files loaded 1:1 from GCS with every column as STRING (scripts/load_raw.sh),
+      so dirty values can never break ingestion. All typing and cleaning happens in staging.
+    database: "{{ var('raw_project') }}"
+    schema: "{{ var('raw_dataset') }}"
+    tables:
+      - name: listings
+        description: >
+          SCD Type 2 history of AutoScout24 / MotoScout24 listings (BigQuery export, gzip CSV parts
+          gs://listings_interview_source/ds_interview_listings_*). One row per listing version;
+          a new version opens on any change (price, status, images, ...).
+          valid_to = 9999-01-01 marks the current version.
+        columns:
+          - name: listing_id
+            tests:
+              - not_null:
+                  config: {severity: warn}
+          - name: valid_from_time
+            tests:
+              - not_null:
+                  config: {severity: warn}
+          - name: status
+            tests:
+              - accepted_values:
+                  values: ['draft', 'activated', 'deactivated', 'removed', 'deleted']
+                  config: {severity: warn}
+
+      - name: users_saved_searches
+        description: >
+          gs://interview_source_csv/users_and_saved_searches.csv. The JSON column is NOT quoted and
+          contains commas, so a regular CSV load splits it. Loaded as one STRING column per line
+          (raw_line) and parsed in staging. The file also contains an empty line.
+        columns:
+          - name: raw_line

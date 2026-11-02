@@ -1,0 +1,44 @@
+version: 2
+
+models:
+  - name: int_listing_price_changes
+    description: >
+      Price changes between consecutive ACTIVATED versions, classified by quality rules.
+      is_valid_drop is the single definition of a "real" price drop, reused by analytics and
+      notifications so both always agree.
+    tests:
+      - dbt_utils.expression_is_true:
+          expression: "drop_pct > 0 and drop_pct <= {{ var('max_valid_drop_pct') }}"
+          config: {where: "is_valid_drop"}
+      - dbt_utils.expression_is_true:
+          expression: "new_price >= {{ var('min_valid_price') }} and old_price >= {{ var('min_valid_price') }}"
+          config: {where: "is_valid_drop"}
+    columns:
+      - name: price_change_id
+        description: = listing_version_id of the version that carries the new price.
+        tests:
+          - unique
+          - not_null
+          - relationships:
+              to: ref('stg_listings__versions')
+              field: listing_version_id
+      - name: change_type
+        tests:
+          - not_null
+          - accepted_values:
+              values: ['drop', 'increase']
+      - name: quality_issue
+        tests:
+          - accepted_values:
+              values: ['below_min_price', 'placeholder_price', 'drop_exceeds_threshold', 'reverted_next_change']
+
+  - name: int_listing_lifecycle
+    description: One row per listing with time actually spent live (status 'activated').
+    columns:
+      - name: listing_id
+        tests: [unique, not_null]
+      - name: days_active
+        tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              expression: ">= 0"

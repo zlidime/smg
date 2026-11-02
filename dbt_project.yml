@@ -1,0 +1,61 @@
+name: smg_listings_dwh
+version: "1.0.0"
+config-version: 2
+profile: smg_listings_dwh
+
+model-paths: ["models"]
+macro-paths: ["macros"]
+test-paths: ["tests"]
+analysis-paths: ["analyses"]
+target-path: "target"
+clean-targets: ["target", "dbt_packages"]
+
+vars:
+  # --- where raw data lives (loaded with scripts/load_raw.sh) ---
+  raw_project: "dime-smg-task"          # switch to smg-ch-automotive-interview for final run
+  raw_dataset: "raw"
+
+  # --- data quality rules (derived from analyses/profiling.sql results) ---
+  min_valid_price: 500                  # below = "price on request" (1), typos entered in thousands (19.9)
+  max_valid_mileage: 1000000            # above = typo / sentinel (99,999,999)
+  max_valid_drop_pct: 0.5               # bigger drop = typo correction, not a real price drop
+  reverted_drop_ratio: 0.9              # drop followed by price back to >= 90% of old = typo
+  reverted_within_hours: 24
+
+  # --- notification rules ---
+  notification_vehicle_categories: ["car"]
+  notification_cooldown_days: 7         # same user+listing not re-notified unless price fell further
+  max_listings_per_digest: 5
+  listing_url_prefix: "https://www.autoscout24.ch/de/d/"
+  run_date: null                        # YYYY-MM-DD; null = last complete day in the data
+
+  # --- analytics ---
+  min_model_sample_size: 20
+  min_peer_group_size: 10
+  overpriced_premium_pct: 0.25          # > 25% above peer-group median = overpriced
+
+  # --- export ---
+  export_bucket: "vladimir_dimitric_bucket"
+
+  # BigQuery sandbox expires partitions older than 60 days -> historic data would vanish.
+  # Turn on in a billed project.
+  use_partitioning: false
+
+models:
+  smg_listings_dwh:
+    +persist_docs:
+      relation: true
+      columns: true
+    staging:
+      +schema: staging
+      +materialized: view
+    intermediate:
+      +schema: intermediate
+      +materialized: table
+    marts:
+      +schema: marts
+      +materialized: table
+
+tests:
+  smg_listings_dwh:
+    +store_failures: false
