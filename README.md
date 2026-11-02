@@ -37,7 +37,7 @@ Listing status lifecycle: `draft → activated ⇄ deactivated → removed → d
 
 | Finding (from profiling) | Volume | Decision | Where |
 |---|---|---|---|
-| Duplicate `(listing_id, valid_from)`. Always a `removed` row with `valid_from = valid_to` plus `deleted`, written by the ~23:45 nightly batch | 18,101 keys | drop **zero-length versions** (never live). This also removes the 8,997 window overlaps | `stg_listings__versions` |
+| Duplicate `(listing_id, valid_from)`. Always a `removed` row with `valid_from = valid_to` plus `deleted`, written by the ~23:45 nightly batch | 18,101 keys | drop **zero-length versions** (never live). This also removes the 8,997 window overlaps | `stg_listings_versions` |
 | One header row per export part when loaded without skip-rows | 80 rows | `skip_leading_rows = 1` on the external table, plus a defensive filter in staging | `scripts/create_raw_external.sql`, staging |
 | `price = 1` = "price on request" | 121k rows | `is_price_on_request`, clean `price` = NULL | staging |
 | Prices typed in thousands (210,000 → **194.9**), anything under 500 CHF | 11k+ | price floor `min_valid_price = 500` | staging + price changes |
@@ -82,7 +82,7 @@ the end-of-day check, and a correction made later than the next morning would al
 
 ```
 raw (STRING)
- ├─ listings (external table on GCS) ─► stg_listings__versions ─┬─► int_listing_price_changes ─► fct_listing_price_changes ─┐
+ ├─ listings (external table on GCS) ─► stg_listings_versions ─┬─► int_listing_price_changes ─► fct_listing_price_changes ─┐
  │                                                               └─► int_listing_lifecycle ──────► dim_listing ─────────────┤
  └─ users_saved_searches ─────────────► stg_saved_searches ─────────────────────────────────────► dim_saved_search ────────┤
                                                                                                                             ▼
@@ -93,7 +93,7 @@ raw (STRING)
 | Layer | Dataset | Models | Materialization | Purpose |
 |---|---|---|---|---|
 | raw | `raw` | `listings`, `users_saved_searches` | external table / table | exact copy of the source files |
-| staging | `vladimir_dimitric_staging` | `stg_listings__versions`, `stg_saved_searches` | view (*) | typed, cleaned, flagged, technical rows removed |
+| staging | `vladimir_dimitric_staging` | `stg_listings_versions`, `stg_saved_searches` | view (*) | typed, cleaned, flagged, technical rows removed |
 | intermediate | `vladimir_dimitric_intermediate` | `int_listing_price_changes`, `int_listing_lifecycle` | table | business-logic building blocks |
 | marts | `vladimir_dimitric_marts` | `dim_listing`, `dim_saved_search`, `fct_listing_price_changes`, notification + report models | table | facts, dimensions and report tables for export |
 
@@ -104,7 +104,7 @@ partitioned table (section 8).
 
 | Model | Rows |
 |---|---|
-| `stg_listings__versions` | ~15.3M versions |
+| `stg_listings_versions` | ~15.3M versions |
 | `dim_listing` | 1.52M listings |
 | `fct_listing_price_changes` | 1.2M price changes |
 | `fct_saved_search_price_drop_matches` | ~155k |
@@ -265,7 +265,7 @@ and this data is from 2024–2025.
 
 ## 8. What I would do in production
 
-- **Incremental models:** `stg_listings__versions` and `int_listing_price_changes` as `incremental` (merge on
+- **Incremental models:** `stg_listings_versions` and `int_listing_price_changes` as `incremental` (merge on
   `listing_version_id`, re-reading a 2-day lookback because a version's `valid_to` is updated when the next one
   arrives). Partition by date, cluster by `listing_id`. Today every downstream model re-scans the staging view
   (~3 GiB per model), which is fine for a test but not for a daily job.
@@ -298,7 +298,7 @@ and this data is from 2024–2025.
 analyses/      profiling.sql, followup.sql         profiling that drove the rules
 macros/        price_rules, run_params, export_to_gcs
 models/
-  staging/     stg_listings__versions, stg_saved_searches (+ sources, tests)
+  staging/     stg_listings_versions, stg_saved_searches (+ sources, tests)
   intermediate/int_listing_price_changes, int_listing_lifecycle
   marts/core/  dim_listing, dim_saved_search, fct_listing_price_changes
   marts/notifications/  fct_saved_search_price_drop_matches, fct_price_drop_notifications, rpt_daily_price_drop_notifications

@@ -4,7 +4,7 @@
   days-on-platform for every listing still active in the extract.
 #}
 {% macro data_snapshot_ts() -%}
-(select max(valid_from) from {{ ref('stg_listings__versions') }})
+(select max(valid_from) from {{ ref('stg_listings_versions') }})
 {%- endmacro %}
 
 

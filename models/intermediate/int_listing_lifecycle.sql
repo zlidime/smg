@@ -20,7 +20,7 @@ with versions as (
         least(v.valid_to, s.snapshot_ts) as valid_to_capped,
         v.is_current,
         lag(v.status) over (partition by v.listing_id order by v.valid_from) as prev_status
-    from {{ ref('stg_listings__versions') }} as v
+    from {{ ref('stg_listings_versions') }} as v
     cross join (select {{ data_snapshot_ts() }} as snapshot_ts) as s
 
 )

@@ -20,7 +20,7 @@ models:
           - unique
           - not_null
           - relationships:
-              to: ref('stg_listings__versions')
+              to: ref('stg_listings_versions')
               field: listing_version_id
       - name: change_type
         tests:

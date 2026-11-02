@@ -24,7 +24,7 @@
 with activated as (
 
     select listing_version_id, listing_id, valid_from, price_raw
-    from {{ ref('stg_listings__versions') }}
+    from {{ ref('stg_listings_versions') }}
     where status = 'activated'
 
 ),

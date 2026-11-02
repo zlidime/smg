@@ -38,5 +38,5 @@ select
     v.first_registration_year,
     v.mileage
 from {{ ref('int_listing_price_changes') }} as pc
-join {{ ref('stg_listings__versions') }} as v
+join {{ ref('stg_listings_versions') }} as v
   on v.listing_version_id = pc.price_change_id

@@ -6,7 +6,7 @@
 
 with current_version as (
 
-    select * from {{ ref('stg_listings__versions') }}
+    select * from {{ ref('stg_listings_versions') }}
     where is_current
 
 ),
@@ -16,7 +16,7 @@ first_live_price as (
     select
         listing_id,
         array_agg(price ignore nulls order by valid_from limit 1)[safe_offset(0)] as first_activated_price
-    from {{ ref('stg_listings__versions') }}
+    from {{ ref('stg_listings_versions') }}
     where status = 'activated'
     group by listing_id
 

@@ -5,7 +5,7 @@ with ordered as (
         listing_id,
         valid_from,
         lag(valid_to) over (partition by listing_id order by valid_from) as prev_valid_to
-    from {{ ref('stg_listings__versions') }}
+    from {{ ref('stg_listings_versions') }}
 )
 select *
 from ordered

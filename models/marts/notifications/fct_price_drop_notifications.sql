@@ -56,7 +56,7 @@ end_of_day as (
         v.seller_type,
         v.number_of_images
     from per_user_listing_day as p
-    join {{ ref('stg_listings__versions') }} as v
+    join {{ ref('stg_listings_versions') }} as v
       on  v.listing_id = p.listing_id
       and v.valid_from <= timestamp_sub(timestamp(date_add(p.drop_date, interval 1 day)), interval 1 microsecond)
       and v.valid_to   >  timestamp_sub(timestamp(date_add(p.drop_date, interval 1 day)), interval 1 microsecond)

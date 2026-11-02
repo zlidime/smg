@@ -1,7 +1,7 @@
 version: 2
 
 models:
-  - name: stg_listings__versions
+  - name: stg_listings_versions
     description: >
       Clean SCD2 history: one row per listing version. Types cast, empty strings -> NULL,
       zero-length technical versions removed, invalid values nulled and flagged (raw kept in *_raw).
