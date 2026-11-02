@@ -14,9 +14,12 @@ LISTINGS_SCHEMA="created_date:STRING,activation_date:STRING,seller_type:STRING,m
 bq --project_id="$PROJECT" show "$PROJECT:$DATASET" >/dev/null 2>&1 \
   || bq --project_id="$PROJECT" mk --dataset --location="$LOCATION" "$PROJECT:$DATASET"
 
-# Listings: gzip CSV export split in parts -> wildcard
-bq --project_id="$PROJECT" load --source_format=CSV --skip_leading_rows=1 --replace \
-  "$PROJECT:$DATASET.listings" "$LISTINGS_URI" "$LISTINGS_SCHEMA"
+# Listings: default = external table (scripts/create_raw_external.sql), no copy.
+# LOAD_LISTINGS=1 loads a native copy instead (needs ~5 GB of storage).
+if [ "${LOAD_LISTINGS:-0}" = "1" ]; then
+  bq --project_id="$PROJECT" load --source_format=CSV --skip_leading_rows=1 --replace \
+    "$PROJECT:$DATASET.listings" "$LISTINGS_URI" "$LISTINGS_SCHEMA"
+fi
 
 # Saved searches: JSON column is unquoted and contains commas -> load each line whole
 # (tab delimiter does not occur in the file, quoting disabled), parse in staging.
