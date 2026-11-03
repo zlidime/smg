@@ -31,7 +31,7 @@ per_user_listing_day as (
         max(changed_at)                                                    as last_drop_at,
         array_to_string(array_agg(distinct cast(saved_search_id as string)
                                   order by cast(saved_search_id as string)), ',') as matched_saved_search_ids,
-        string_agg(distinct search_label, ' | ')                           as matched_search_labels,
+        string_agg(distinct search_label, ' | ' order by search_label)     as matched_search_labels,
         logical_or(entered_price_range)                                    as entered_price_range,
         logical_or(has_unsupported_filters)                                as matched_search_has_unsupported_filters
     from matches
