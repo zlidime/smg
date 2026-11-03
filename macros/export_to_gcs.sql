@@ -48,3 +48,12 @@
   {{ export_model_to_gcs('rpt_days_on_platform',         'analytics', order_by='grouping_level, n_listings desc', bucket=bucket) }}
   {{ export_model_to_gcs('rpt_overpriced_listings',      'analytics', order_by='price_premium_pct desc', bucket=bucket) }}
 {% endmacro %}
+
+{% macro export_daily_notifications(bucket=none) %}
+  {% set res = run_query('select cast(' ~ notification_run_date() ~ ' as string)') %}
+  {% set run_date = res.columns[0].values()[0] if execute else none %}
+  {{ export_model_to_gcs('rpt_daily_price_drop_notifications', 'notifications/run_date=' ~ run_date,
+                         order_by='user_id, digest_rank', bucket=bucket) }}
+  {{ export_model_to_gcs('rpt_daily_notification_recipients', 'notifications/run_date=' ~ run_date,
+                         order_by='user_id', bucket=bucket) }}
+{% endmacro %}
