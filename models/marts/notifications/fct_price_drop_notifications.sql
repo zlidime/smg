@@ -63,12 +63,16 @@ end_of_day as (
 
 ),
 
-eligible as (
+
+    eligible as (
 
     select *
     from end_of_day
     where eod_status = 'activated'
       and price_now < price_before
+      and safe_divide(price_before - price_now, price_before) <= {{ var('max_valid_drop_pct') }}
+
+
 
 ),
 
