@@ -72,6 +72,11 @@ models:
           expression: "n_listings_in_digest <= {{ var('max_listings_per_digest') }}"
       - dbt_utils.expression_is_true:
           expression: "price_now_chf < price_before_chf"
+  - name: rpt_daily_notification_recipients
+    description: Q2 - one row per user to notify for run_date (summary of rpt_daily_price_drop_notifications).
+    columns:
+      - name: user_id
+        tests: [unique, not_null]
 
   # ---------------- analytics ----------------
   - name: rpt_avg_price_drop_per_model
