@@ -26,6 +26,8 @@ with activated as (
     select listing_version_id, listing_id, valid_from, price_raw
     from {{ ref('stg_listings_versions') }}
     where status = 'activated'
+    and price_raw is not null      -- missing/unparseable price is not a visible price change
+                                     -- (0 rows today; guards future data)
 
 ),
 
