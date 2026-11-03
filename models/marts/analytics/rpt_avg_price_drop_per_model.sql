@@ -17,17 +17,20 @@ with drops as (
       and model_key is not null
 
 ),
-
 per_listing as (
 
     select
         make_key,
         model_key,
         listing_id,
-        max(old_price)                       as highest_price_before_drop,
-        min(new_price)                       as lowest_price_after_drop,
-        sum(drop_amount)                     as total_drop_amount
-    from drops
+        max(running_peak - new_price)                         as max_drawdown_chf,
+        max(safe_divide(running_peak - new_price, running_peak)) as max_drawdown_pct
+    from (
+        select *,
+               max(old_price) over (partition by listing_id order by changed_at
+                                    rows between unbounded preceding and current row) as running_peak
+        from drops
+    )
     group by make_key, model_key, listing_id
 
 ),
@@ -37,14 +40,13 @@ listing_agg as (
     select
         make_key,
         model_key,
-        count(*)                                                            as n_listings_with_drop,
-        avg(total_drop_amount)                                              as avg_total_drop_per_listing_chf,
-        avg(safe_divide(total_drop_amount, highest_price_before_drop))      as avg_total_drop_per_listing_pct
+        count(*)                   as n_listings_with_drop,
+        avg(max_drawdown_chf)      as avg_total_drop_per_listing_chf,
+        avg(max_drawdown_pct)      as avg_total_drop_per_listing_pct
     from per_listing
     group by make_key, model_key
 
 ),
-
 event_agg as (
 
     select
