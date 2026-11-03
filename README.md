@@ -4,7 +4,7 @@ dbt + BigQuery solution for the Data Engineer homework. It builds a raw → stag
 AutoScout24 / MotoScout24 listing history and users' saved searches, and produces a daily price-drop
 notification export to GCS plus three analytics reports.
 
-**Status:** full build on all data: 13 models, 62 data tests, **PASS = 75, WARN = 0, ERROR = 0**.
+**Status:** built and tested on the full data in `smg-ch-automotive-interview` (14 models, 65 data tests, all passing). Exports are in `gs://vladimir_dimitric_bucket`.
 
 ---
 
@@ -78,6 +78,19 @@ A typo is fixed within hours; a promotion runs for days, and a buyer could have 
 **Caveat:** the revert rule looks ahead. That's fine for historical analytics. In the daily run it's covered by
 the end-of-day check, and a correction made later than the next morning would already have been notified.
 
+### 3.2 What the data shows (cars, full history)
+
+| Metric | Value |
+|---|---|
+| cars ever live | 1.30M |
+| of which no longer live (completed) | 1.15M |
+| days live until sold / removed (completed) | **median ~27, average ~54** (long tail of listings live for months) |
+| private sellers vs dealers (average, completed) | **36.5 vs 55.9 days** |
+| activation episodes per listing | 1.38 on average (relisting is common, so days live must sum the activated periods) |
+
+Private cars leave the platform about 20 days faster than dealer cars. One plausible reason is more realistic
+pricing or a more motivated seller. That's a hypothesis worth testing, not a finding.
+
 ## 4. Model layers
 
 ```
@@ -86,7 +99,7 @@ raw (STRING)
  │                                                               └─► int_listing_lifecycle ──────► dim_listing ─────────────┤
  └─ users_saved_searches ─────────────► stg_saved_searches ─────────────────────────────────────► dim_saved_search ────────┤
                                                                                                                             ▼
-                      fct_saved_search_price_drop_matches ─► fct_price_drop_notifications ─► rpt_daily_price_drop_notifications ─► GCS CSV
+                      fct_saved_search_price_drop_matches ─► fct_price_drop_notifications ─► rpt_daily_price_drop_notifications ─► rpt_daily_notification_recipients ─► GCS CSV (both)
                       rpt_avg_price_drop_per_model · rpt_days_on_platform · rpt_overpriced_listings ─────────────────────────► GCS CSV
 ```
 
@@ -110,6 +123,7 @@ partitioned table (section 8).
 | `fct_saved_search_price_drop_matches` | ~155k |
 | `fct_price_drop_notifications` | ~147k candidates (all days) |
 | `rpt_daily_price_drop_notifications` | 25 rows for 2025-10-28 (5 users × cap of 5) |
+| `rpt_daily_notification_recipients` | 5 users for 2025-10-28 |
 | `rpt_avg_price_drop_per_model` | ~1.2k models |
 | `rpt_overpriced_listings` | ~6.5k listings |
 
@@ -154,7 +168,14 @@ How a candidate becomes a row (`fct_price_drop_notifications`):
 Suppressed and capped rows stay in `fct_price_drop_notifications` with their flags, for audit and tuning. The
 export filters `is_selected_for_digest`.
 
-The export contains `user_id` only. The CRM / messaging service joins email, push token, language and opt-in
+**Two files per day** answer "which users" and "what we share" separately:
+
+| File | Grain | Use |
+|---|---|---|
+| `rpt_daily_notification_recipients` | one row per user | who gets a message today: subject, number of cars, cars now in budget, matched searches, rendered message body, listing ids |
+| `rpt_daily_price_drop_notifications` | one row per car in a user's digest | what to render: car, prices, drop, link, rank |
+
+The exports contain `user_id` only. The CRM / messaging service joins email, push token, language and opt-in
 preferences, none of which are in this dataset.
 
 ### Q3. How often, and what the message contains
@@ -185,7 +206,7 @@ matching search and gives controls, which matters for trust and is required for 
 
 ```bash
 gcloud storage buckets create gs://vladimir_dimitric_bucket --location=EU
-dbt run-operation export_daily_notifications   # -> gs://vladimir_dimitric_bucket/notifications/run_date=YYYY-MM-DD/*.csv
+dbt run-operation export_daily_notifications   # -> gs://vladimir_dimitric_bucket/notifications/run_date=YYYY-MM-DD/ (recipients + notifications)
 dbt run-operation export_analytics             # -> gs://vladimir_dimitric_bucket/analytics/*.csv
 ```
 BigQuery `EXPORT DATA` with `overwrite = true` makes it idempotent: re-running a day replaces that day's file.
@@ -227,6 +248,14 @@ least 20 drop events. Two views, because "average drop" can mean either:
 - **business rules:** a valid drop is between 0% and 50% and above the floor; matches only within the search lifetime;
   every match re-checked independently against every filter; notification price below the price before; digest cap
   respected; one row per user + listing in the daily export
+
+**Reconciliation audit** (`tests/assert_days_on_platform_reconciles.sql`): `rpt_days_on_platform` uses
+`GROUPING SETS`, so the audit recomputes each level with a separate `GROUP BY` and full-outer-joins the two.
+Result: **all 1,485 groups reconcile**. Counts and averages are identical. Medians differ only in the three
+largest groups (by up to 1 day), which is the expected approximation of `APPROX_QUANTILES`, so medians are compared
+with a tolerance (2% or 1 day). A second check confirms the seller-type rows add up to the all-cars total
+(128,764 + 1,167,298 = 1,296,062). The audit checks the aggregation mechanics, not the `days_active` definition
+itself.
 
 Lesson from section 3.1: the tests guard the structure, but the v1 revert bug passed all of them. A useful
 addition would be a guard on distributions, e.g. the share of drops flagged `reverted_next_change` must stay
@@ -301,8 +330,9 @@ models/
   staging/     stg_listings_versions, stg_saved_searches (+ sources, tests)
   intermediate/int_listing_price_changes, int_listing_lifecycle
   marts/core/  dim_listing, dim_saved_search, fct_listing_price_changes
-  marts/notifications/  fct_saved_search_price_drop_matches, fct_price_drop_notifications, rpt_daily_price_drop_notifications
+  marts/notifications/  fct_saved_search_price_drop_matches, fct_price_drop_notifications,
+                        rpt_daily_price_drop_notifications, rpt_daily_notification_recipients
   marts/analytics/      rpt_avg_price_drop_per_model, rpt_days_on_platform, rpt_overpriced_listings
-tests/         singular tests (SCD2 invariants, matching rules)
+tests/         singular tests (SCD2 invariants, matching rules, days-on-platform reconciliation)
 scripts/       create_raw_external.sql, load_raw.sh, run_profiling.py
 ```

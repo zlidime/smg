@@ -3,7 +3,7 @@
 -- All columns STRING: typing and cleaning happen in staging.
 -- Swap the project/dataset for the target environment.
 
-CREATE OR REPLACE EXTERNAL TABLE `dime-smg-task.raw.listings` (
+CREATE OR REPLACE EXTERNAL TABLE `smg-ch-automotive-interview.vladimir_dimitric_raw.listings` (
   created_date STRING, activation_date STRING, seller_type STRING, make_key STRING,
   model_key STRING, price STRING, first_registration_year STRING, mileage STRING,
   fuel_type STRING, condition_type STRING, body_color STRING, valid_from_time STRING,
@@ -19,4 +19,4 @@ OPTIONS (
 );
 
 -- check: expect headers = 0, n = 15294784
--- SELECT COUNTIF(status = 'status') AS headers, COUNT(*) AS n FROM `dime-smg-task.raw.listings`;
+-- SELECT COUNTIF(status = 'status') AS headers, COUNT(*) AS n FROM `smg-ch-automotive-interview.vladimir_dimitric_raw.listings`;
