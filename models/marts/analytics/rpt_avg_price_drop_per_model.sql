@@ -3,8 +3,7 @@
 
   Two complementary views, both based on the same is_valid_drop definition:
   - per drop EVENT: how big is a typical single price cut (CHF and %)
-  - per LISTING: total reduction from first live price to lowest live price, for listings that
-    dropped at least once (what a seller of this model typically gives away overall)
+  - per LISTING: max drawdown from the running peak price to a later price, for listings that
   Cars only; models with fewer than min_model_sample_size drop events are excluded (noise).
 */
 
