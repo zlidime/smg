@@ -67,7 +67,7 @@ ORDER BY col, n DESC;
 
 -- 5. Outliers / sentinel values --------------------------------------
 SELECT
-  COUNTIF(price <= 1)                                 AS price_placeholder,   -- "price on request"
+  COUNTIF(price <= 1)                                 AS price_placeholder,   -- placeholder (95% drafts, see README 3.3)
   COUNTIF(price BETWEEN 2 AND 99)                     AS price_suspicious_low,
   COUNTIF(price >= 2000000)                           AS price_suspicious_high,
   COUNTIF(price IN (1111111,7777777,9999999,1234567)) AS price_pattern,

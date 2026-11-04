@@ -39,7 +39,7 @@ models:
           - accepted_values:
               values: ['new', 'used', 'demonstration', 'pre-registered', 'oldtimer']
       - name: price
-        description: Clean price in CHF. NULL when price on request, below the floor, or a placeholder.
+        description: Clean price in CHF. NULL when below the floor or a placeholder (incl. price = 1).
         tests:
           - dbt_utils.expression_is_true:
               expression: ">= {{ var('min_valid_price') }}"
@@ -49,7 +49,10 @@ models:
       - name: mileage
         description: NULL when negative or above max_valid_mileage. Note profiling found many 'used' cars with 0 km and 'new' cars with >1000 km - mileage is not reliable enough for hard filters.
       - name: is_price_on_request
-        description: Raw price <= 1 (platform convention for "price on request").
+        description: >
+          Raw price <= 1. Profiling shows a placeholder while the ad is being created
+          (95% of such versions are drafts), not "price on request" as first assumed;
+          name kept, would be is_price_placeholder.
 
   - name: stg_saved_searches
     description: Saved searches parsed from the raw line; one row per search.

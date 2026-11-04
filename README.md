@@ -42,7 +42,7 @@ Listing status lifecycle: `draft → activated ⇄ deactivated → removed → d
 |---|---|---|---|
 | Duplicate `(listing_id, valid_from)`. Always a `removed` row with `valid_from = valid_to` plus `deleted`, written by the ~23:45 nightly batch | 18,101 keys | drop **zero-length versions** (never live). This also removes the 8,997 window overlaps | `stg_listings_versions` |
 | One header row per export part when loaded without skip-rows | 80 rows | `skip_leading_rows = 1` on the external table, plus a defensive filter in staging | `scripts/create_raw_external.sql`, staging |
-| `price = 1` = "price on request" | 121k rows | `is_price_on_request`, clean `price` = NULL | staging |
+| `price = 1`: a **placeholder while the ad is being created** (see 3.3) | 121k versions, **95% in `draft`**; only 3,249 live (0.04% of activated versions) | not a real price: clean `price` = NULL, flagged. Drafts are never compared anyway (only activated versions are), and the live ones fall under the 500 CHF floor | staging |
 | Prices typed in thousands (210,000 → **194.9**), anything under 500 CHF | 11k+ | price floor `min_valid_price = 500` | staging + price changes |
 | Placeholder prices 11111 / 55555 / 123456 / 9999999 | ~1k | `is_placeholder_price` macro (repeated digits / sequences ≥ 10k) | `macros/price_rules.sql` |
 | Drops > 50%, mostly extra-digit typos (383,600 → 38,300) | 9,793 | `drop_exceeds_threshold`, not a valid drop | `int_listing_price_changes` |
@@ -110,6 +110,29 @@ Final classification of all 1.23M public price changes:
 
 Private cars leave the platform about 20 days faster than dealer cars. One plausible reason is more realistic
 pricing or a more motivated seller. That's a hypothesis worth testing, not a finding.
+
+### 3.3 Testing an assumption: what does `price = 1` mean?
+
+My first hypothesis was "price on request", a common marketplace convention. I tested it against the data:
+
+| By segment | Share of versions with `price = 1` |
+|---|---|
+| private, used | **2.53%** |
+| professional, used | 0.65% |
+| professional, new | 0.02% |
+
+"Price on request" is typical for dealers and new or expensive cars; here it is the opposite. By status:
+
+| Status | Versions with `price = 1` | Share |
+|---|---|---|
+| draft | 114,953 | **95%** |
+| activated | 3,249 | 2.7% |
+| deactivated / removed / deleted | 2,815 | 2.3% |
+
+So `price = 1` is a **placeholder while a (mostly private) seller creates the ad**, not "price on request". The model
+logic didn't depend on the interpretation: drafts are never compared, and the few live ones fall under the 500 CHF
+floor. The flag keeps its original name `is_price_on_request`; in production it would be renamed
+`is_price_placeholder`.
 
 ## 4. Model layers
 
@@ -406,7 +429,7 @@ and this data is from 2024–2025.
   `version_full_name`), or use a regression / ML price estimate (make, model, version, year, mileage, fuel, power,
   equipment) instead of peer medians. Today the top of the list is dominated by special variants (Golf R32 at
   +2,182% vs ordinary 2004 Golfs). The same model could power a "good deal" badge.
-- **Data contracts with the source team:** zero-length duplicate versions, the `price = 1` convention and
+- **Data contracts with the source team:** zero-length duplicate versions, the `price = 1` placeholder and
   decimal-thousand typos should be fixed or documented at the source, not only patched downstream.
 - **Monitoring:** source freshness, row-count anomaly checks, and distribution guards (share of rejected drops,
   notifications per day).

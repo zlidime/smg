@@ -1,5 +1,5 @@
 {#
-  Placeholder prices seen in profiling: 1 ("price on request"), 11111, 55555, 123456,
+  Placeholder prices seen in profiling: 1 (placeholder while the ad is drafted), 11111, 55555, 123456,
   7777777, 9999999 ... A repeated-digit or 1234.. sequence >= 10'000 is treated as a placeholder.
   BigQuery RE2 has no back-references, so "all digits equal" = removing the first digit leaves ''.
 #}

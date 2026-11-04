@@ -13,21 +13,22 @@
   Rejected changes stay in the table with quality_issue for audit.
 
   quality_issue (first matching rule wins):
-    below_min_price         old or new price < min_valid_price (price on request = 1,
+    below_min_price         old or new price < min_valid_price (placeholder price = 1,
                             prices typed in thousands: 210000 -> 194.9)
     placeholder_price       11111 / 55555 / 123456 / 9999999 ...
     drop_exceeds_threshold  drop > max_valid_drop_pct (383600 -> 38300: extra digit)
     reverted_next_change    price goes back UP to >= reverted_drop_ratio of old price within
-                            reverted_within_hours (typo fixed / mistaken repricing). Slower reverts
-                            are real temporary discounts and stay valid.*/
+                            reverted_within_hours (181900 -> 18911 -> 180911: typo fixed).
+                            Slower reverts are real temporary discounts and stay valid.
+*/
 
 with activated as (
 
     select listing_version_id, listing_id, valid_from, price_raw
     from {{ ref('stg_listings_versions') }}
     where status = 'activated'
-    and price_raw is not null      -- missing/unparseable price is not a visible price change
-                                     -- (0 rows today; guards future data)
+      and price_raw is not null      -- missing/unparseable price is not a visible price change
+                                     -- (0 rows today; guards future data, change_type never NULL)
 
 ),
 
@@ -50,6 +51,7 @@ changes as (
       and price_raw is distinct from prev_price_raw
 
 ),
+
 with_next as (
 
     select
@@ -59,8 +61,6 @@ with_next as (
     from changes
 
 ),
-
-
 
 classified as (
 
@@ -89,10 +89,10 @@ classified as (
             when price_raw < prev_price_raw
              and safe_divide(prev_price_raw - price_raw, prev_price_raw) > {{ var('max_valid_drop_pct') }}
                 then 'drop_exceeds_threshold'
-              when price_raw < prev_price_raw
-                    and next_price_raw > price_raw
-                    and next_price_raw >= prev_price_raw * {{ var('reverted_drop_ratio') }}
-                    and timestamp_diff(next_changed_at, valid_from, hour) < {{ var('reverted_within_hours') }}
+            when price_raw < prev_price_raw
+             and next_price_raw > price_raw
+             and next_price_raw >= prev_price_raw * {{ var('reverted_drop_ratio') }}
+             and timestamp_diff(next_changed_at, valid_from, hour) < {{ var('reverted_within_hours') }}
                 then 'reverted_next_change'
         end                                              as quality_issue
     from with_next
