@@ -6,7 +6,8 @@ notification export to GCS plus three analytics reports.
 
 **Status:** built and tested on the full data in `smg-ch-automotive-interview`: 14 models, **65 data tests, all passing**
 (`dbt build`: 79 nodes, 0 errors). Five independent audit queries reconcile (section 6). Exports are in
-`gs://vladimir_dimitric_bucket`.
+`gs://vladimir_dimitric_bucket`: `notifications/run_date=2025-10-28/` (recipients + notifications) and `analytics/`
+(three reports).
 
 ---
 
@@ -47,6 +48,7 @@ Listing status lifecycle: `draft → activated ⇄ deactivated → removed → d
 | Drops > 50%, mostly extra-digit typos (383,600 → 38,300) | 9,793 | `drop_exceeds_threshold`, not a valid drop | `int_listing_price_changes` |
 | Drop reverted within 24h (181,900 → 18,911 → 180,911) | 24,532 | `reverted_next_change`, not a valid drop (see 3.1) | same |
 | Price edits in `draft` / `deactivated` (40,000 → 41 in a draft) | – | only consecutive **activated** versions are compared | same |
+| **Relist + same-day edit session.** Listing 12848610 (VW Polo): `removed` on 25 Oct at 7,490, relisted on 28 Oct; 7,490 was live for **5 seconds**, then 10 versions in 10 minutes ending at 3,500 | real case found in the export | comparing activated versions sees two valid drops (−47.9%, −10.3%); collapsed per day that is −53.3% → caught by the **daily** 50% cap | `fct_price_drop_notifications` |
 | Missing / unparseable price in an activated version | 0 rows | excluded from price-change events before the `LAG` (20k → NULL → 19k reads as 20k → 19k), so `change_type` can never be NULL. Guards future data | same |
 | Registration year 1880 / 2923 | 592 | NULL outside 1900..current+1 | staging |
 | Mileage 99,999,999 / > 1M km | 7.5k | NULL | staging |
@@ -102,8 +104,8 @@ Final classification of all 1.23M public price changes:
 |---|---|
 | cars ever live | 1.30M |
 | of which no longer live (completed) | 1.15M |
-| days live until sold / removed (completed) | **median ~27, average ~54** (long tail of listings live for months) |
-| private sellers vs dealers (average, completed) | **36.5 vs 55.9 days** |
+| days live until sold / removed (completed) | **median ~28, average ~54** (long tail of listings live for months) |
+| private sellers vs dealers (completed) | **average 36.5 vs 55.9 days, median ~23 vs ~28** |
 | activation episodes per listing | 1.38 on average (relisting is common, so days live must sum the activated periods) |
 
 Private cars leave the platform about 20 days faster than dealer cars. One plausible reason is more realistic
@@ -141,7 +143,7 @@ partitioned table (section 8).
 | `fct_saved_search_price_drop_matches` | 162.8k |
 | `fct_price_drop_notifications` | 154.4k candidates (all days) |
 | `rpt_daily_price_drop_notifications` | 25 rows for 2025-10-28 (5 users × cap of 5) |
-| `rpt_daily_notification_recipients` | 5 users for 2025-10-28 |
+| `rpt_daily_notification_recipients` | 5 users / 5 emails for 2025-10-28 (users 101 and 102: all 5 cars entered their budget; 105: 2 of 5) |
 | `rpt_avg_price_drop_per_model` | ~1.2k models |
 | `rpt_overpriced_listings` | ~6.5k listings |
 
@@ -158,9 +160,12 @@ partitioned table (section 8).
 - `entered_price_range` is set when the drop moved the car **into** the user's budget (old price above
   `price_max`, new price within it). That's the strongest reason to notify, so it ranks first.
 
-All filters are optional, so there's no universal equi-join key (joining on `make_key` would drop 4 of the 15
-searches). With 15 searches, a cross join plus filter is cheap and honest about the cost. At scale it becomes an
-equi-join on `make_key` plus a small cross-join branch for searches without a make (section 8).
+**Why a cross join:** every search filter is optional, so no column can serve as a join key for all searches.
+Joining on `make_key` would silently drop the 4 searches without a make (ids 2, 4, 7, 14). Each drop is therefore
+checked against each search (`CROSS JOIN` + `WHERE`). With 15 searches that is about 1M drops × 15 = 15M cheap
+comparisons, and the model stays readable top to bottom. At SMG scale (millions of searches) I would split it: an
+equi-join on `make_key` for searches with a make, plus a small cross-join branch for searches without one. I tested
+that variant: it returns exactly the same rows (no differences in either direction).
 
 ### Q2. Daily export: who gets notified and with what
 
@@ -178,7 +183,9 @@ How a candidate becomes a row (`fct_price_drop_notifications`):
 1. **Collapse:** several matching searches of one user, or several drops of one car in a day, become **one row
    per user + car + day**. A digest can mix cars from different searches of the same user.
 2. **End-of-day check:** the car is still `activated`, and its end-of-day price is still below the price before
-   the first drop. No alert for a car that was sold, paused or repriced back up the same day.
+   the first drop. No alert for a car that was sold, paused or repriced back up the same day. The 50% cap is
+   applied again per user/car/day: several same-day drops collapsed into one notification can add up past the
+   threshold even when each drop passes on its own (the Polo case in section 3).
 3. **Cooldown (7 days):** suppressed if the same user + car already had a candidate in the last 7 days at the
    same or a lower price. A further drop does notify again. The cooldown is based on **eligible candidates**, not
    confirmed deliveries: a car cut by yesterday's 5-car cap can suppress itself today unless its price drops
@@ -194,6 +201,16 @@ export filters `is_selected_for_digest`.
 |---|---|---|
 | `rpt_daily_notification_recipients` | one row per user | who gets a message today: subject, number of cars, cars now in budget, matched searches, rendered message body, listing ids |
 | `rpt_daily_price_drop_notifications` | one row per car in a user's digest | what to render: car, prices, drop, link, rank |
+
+**One email per user per day, with up to 5 cars** from all of the user's active searches combined. A car matched
+by several searches appears once and lists all its search ids (e.g. user 105: `15,5`). Ranking is per user, not per
+search: cars that entered a budget first, then by % drop. `n_cars_entered_budget` counts cars whose drop moved them
+into a search's `price_max`, so it is always 0 for searches without an upper price limit (users 103 and 104 on
+2025-10-28). If no car qualifies, the user gets no email that day.
+
+Which version each value comes from: matching uses the version **at the moment of the drop**; `price_now`, the status
+check and the car details shown in the message use the version **active at the end of the day** (exactly one, by the
+SCD2 invariants); `price_before` is the old price of the day's **first** drop.
 
 The exports contain `user_id` only. The CRM / messaging service joins email, push token, language and opt-in
 preferences, none of which are in this dataset.
@@ -243,10 +260,21 @@ BigQuery `EXPORT DATA` with `overwrite = true` makes it idempotent: re-running a
 All three are dbt models, so they're tested, documented and exportable. The SQL is in `models/marts/analytics/`.
 
 **a. Average price drop per model** (`rpt_avg_price_drop_per_model`). Cars, valid drops only, models with at
-least 20 drop events. Two views, because "average drop" can mean either:
+least 20 drop events (1,223 models). Two views, because "average drop" can mean either:
 - per drop **event**: average and median CHF, average %
 - per **listing**: **max drawdown**, the largest fall from the running peak price to a later price, in time order.
   Not the sum of drops, which double-counts when the price goes up in between (20k → 18k → 25k → 24k).
+
+| Model | Drop events | Avg drop per event | Avg max drawdown per listing |
+|---|---|---|---|
+| VW Golf | 24,411 | 6.7% | 1,910 CHF (12.0%) |
+| Skoda Octavia | 15,027 | 6.9% | 1,770 CHF (11.5%) |
+| VW Tiguan | 14,908 | 4.6% | 2,997 CHF (9.0%) |
+| VW Polo | 12,294 | 6.5% | 1,787 CHF (11.5%) |
+| Audi A3 | 10,017 | 6.8% | 2,370 CHF (12.1%) |
+| Tesla Model 3 | 9,996 | 2.4% | 2,616 CHF (8.5%) |
+
+Tesla stands out: many small cuts (2.4% per event) rather than a few large ones.
 
 **b. Average days a car is on the platform** (`rpt_days_on_platform`)
 - days = time actually spent in `activated` status, summed over relists. **Not** `removed − created`: drafts were
@@ -257,6 +285,8 @@ least 20 drop events. Two views, because "average drop" can mean either:
 - levels via `GROUPING SETS`: all cars, seller type, make, make + model. The median sits beside the average
   because durations are skewed.
 - "now" = the data snapshot (2025-10-29), not `current_date()`.
+- Most listed models sell or leave within about 3 weeks (median, completed): Golf 23.4, Octavia 21.0, Polo 21.2,
+  A3 22.2 days.
 
 **c. Overpriced listings** (`rpt_overpriced_listings`)
 - peer group = same make, model, registration year, condition and mileage band, among cars live at the snapshot,
@@ -266,6 +296,18 @@ least 20 drop events. Two views, because "average drop" can mean either:
 - output: premium in % and CHF, peer p25 / median / p75, number of peers, days live.
 - This is a heuristic flag for **potential** overpricing (price vs comparable cars), not proof: equipment,
   condition and history aren't in the data.
+- Result: 6,538 listings flagged, 1,707 of them stale. The extreme end shows the limit of a `model_key` peer
+  group: the top results are performance and collector variants compared with ordinary versions of the same model.
+
+  | Listing | Car | Price (CHF) | Peer median (CHF) | Premium |
+  |---|---|---|---|---|
+  | 11510624 | VW Golf R32 4Motion, 2004 | 38,800 | 1,700 | +2,182% |
+  | 11839959 | Ford Focus RS500, 2010 | 31,900 | 2,600 | +1,127% |
+  | 12326961 | VW Golf GTI 25 Years, 2001 | 12,500 | 1,600 | +681% |
+  | 12607621 | Subaru Impreza WRX, 2010 | 14,500 | 1,950 | +644% |
+  | 12753158 | Porsche 911 GT3 R Rennsport, 2025 | 1,570,000 | 211,500 | +642% |
+
+  A premium above ~100% (614 listings) is more likely a special variant than an overpriced car.
 
 ## 6. Tests
 
@@ -296,8 +338,8 @@ Five recalculation queries, each returning only discrepancies (0 rows = pass):
 All counts and averages match exactly. The only differences are **medians in the three largest groups** of audit 2
 (all cars 27.6 vs 27.7, private 23.1 vs 22.8, dealers 27.1 vs 27.9 days, i.e. < 1 day on 130k–1.3M listings). That is
 the expected approximation of `APPROX_QUANTILES`: it keeps a compressed sketch, so its error grows with group size and
-two runs can differ slightly. Smaller groups match exactly. Medians are therefore compared with a tolerance (2% or
-1 day). The seller-type rows also add up to the all-cars total (128,764 + 1,167,298 = 1,296,062), so no rows are lost.
+two runs can differ slightly. Smaller groups match exactly. Medians are therefore compared with a tolerance (5% or
+2 days); in one rebuild the all-cars median came out 27.8 vs 26.7 days, which a 1-day tolerance flagged. The seller-type rows also add up to the all-cars total (128,764 + 1,167,298 = 1,296,062), so no rows are lost.
 
 Note: the audits check the **mechanics** (aggregation, joins, flags); they reuse the same business definitions
 (`is_valid_drop`, `days_active`), so they don't validate those definitions themselves. The definitions are justified
@@ -353,10 +395,17 @@ and this data is from 2024–2025.
   compares against **candidates**, not what was **sent**. A car cut by yesterday's cap suppresses itself today
   unless the price drops further. Using sends is recursive (today depends on yesterday's selection), so it needs
   an incremental model or CRM feedback.
-- **Scaling the match:** an equi-join on `make_key` plus a small cross-join branch for searches without a make,
-  or invert it: index searches by filter, or match per event in a streaming service.
-- **Better overpriced model:** a regression / ML price estimate (make, model, year, mileage, fuel, power,
-  equipment) instead of peer medians. The same model could power a "good deal" badge.
+- **Scaling the match:** an equi-join on `make_key` plus a small cross-join branch for searches without a make
+  (already tested: identical rows), or invert it: index searches by filter, or match per event in a streaming service.
+- **Relists and edit sessions:** treat a relist after `removed` as its own event ("back on the market") instead
+  of a price drop, and take `price_before` from the last price the user could actually see (e.g. end of the
+  previous day), so a removed period or a seller's same-day editing session can't produce a misleading drop.
+- **Near-duplicate listings:** a dealer can list identical cars separately (user 101 got two EX30s with the same
+  spec and price, listings 12859594 and 12859595); the digest could collapse them into one entry.
+- **Better overpriced model:** add the version / trim to the peer group (tokens like R32, RS, GTI, AMG, GT3 from
+  `version_full_name`), or use a regression / ML price estimate (make, model, version, year, mileage, fuel, power,
+  equipment) instead of peer medians. Today the top of the list is dominated by special variants (Golf R32 at
+  +2,182% vs ordinary 2004 Golfs). The same model could power a "good deal" badge.
 - **Data contracts with the source team:** zero-length duplicate versions, the `price = 1` convention and
   decimal-thousand typos should be fixed or documented at the source, not only patched downstream.
 - **Monitoring:** source freshness, row-count anomaly checks, and distribution guards (share of rejected drops,

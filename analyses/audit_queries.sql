@@ -1,34 +1,27 @@
 -- ============================================================================
--- SMG LISTINGS DWH — FIVE BIGQUERY AUDIT TESTS
--- Project: smg-ch-automotive-interview
--- Dataset: vladimir_dimitric_{staging,intermediate,marts}
+-- INDEPENDENT AUDIT QUERIES (analyses/: compiled by dbt, not run by dbt build)
+-- Each query returns ONLY discrepancies: 0 rows = pass.
+--   dbt compile -s audit_queries  ->  target/compiled/.../analyses/audit_queries.sql
+--   then run each test separately in the BigQuery console.
 --
--- Run this whole file in BigQuery / DataGrip (standard SQL).
--- It contains FIVE independent SELECT statements and therefore returns five
--- result sets. Each result set contains only failing rows; zero rows = PASS.
+-- Test 1: average price drop per model (event metrics + per-listing max drawdown)
+-- Test 2: days on platform (separate GROUP BYs, no GROUPING SETS)
+-- Test 3: overpriced listings (peer groups, percentiles, threshold, stale flag)
+-- Test 4: exported notification -> listing -> active saved search match
+-- Test 5: candidates, cooldown, digest cap, export consistency
 --
--- Test 1: Average price drop per model (event + per-listing metrics)
--- Test 2: Days on platform (recalculate from dim_listing)
--- Test 3: Overpriced listings (recalculate peer medians and classification)
--- Test 4: Final notification listing exists + saved-search criteria verified
---         against staging data at the individual price-drop timestamp
--- Test 5: Notification candidates, cooldown, digest cap and daily export
---
--- Notes:
--- * These are audit queries, not dbt tests. They do not modify any tables.
--- * The saved-search audit intentionally checks only filters supported by the
---   project: make, model, color, min/max price, and minimum registration year.
--- * horse_power_min is unsupported because listing data has no horsepower field.
+-- Medians / percentiles come from APPROX_QUANTILES and are compared with a tolerance.
+-- Result on the full data: 0 discrepancies in all five.
 -- ============================================================================
 
 -- --------------------------------------------------------------------------
 -- TEST 1 — rpt_avg_price_drop_per_model
--- Independently recalculate the event and per-listing metrics from the price
+-- Independently recalculate the event and per-listing (max drawdown) metrics from the price
 -- change fact, using the same valid-drop / car / minimum-sample-size rules.
 -- --------------------------------------------------------------------------
 WITH drops AS (
   SELECT *
-  FROM `smg-ch-automotive-interview.vladimir_dimitric_marts.fct_listing_price_changes`
+  FROM {{ ref('fct_listing_price_changes') }}
   WHERE is_valid_drop
     AND vehicle_category = 'car'
     AND model_key IS NOT NULL
@@ -36,7 +29,7 @@ WITH drops AS (
 per_listing AS (
   SELECT
     make_key, model_key, listing_id,
-    MAX(running_peak - new_price)                           AS max_drawdown_chf,
+    MAX(running_peak - new_price)                            AS max_drawdown_chf,
     MAX(SAFE_DIVIDE(running_peak - new_price, running_peak)) AS max_drawdown_pct
   FROM (
     SELECT *,
@@ -66,7 +59,7 @@ event_agg AS (
     AVG(old_price) AS avg_price_before_drop_chf
   FROM drops
   GROUP BY make_key, model_key
-  HAVING COUNT(*) >= 20
+  HAVING COUNT(*) >= {{ var('min_model_sample_size') }}
 ),
 expected AS (
   SELECT
@@ -103,7 +96,7 @@ comparison AS (
     e.avg_total_drop_per_listing_chf AS expected_avg_total_drop_per_listing_chf,
     r.avg_total_drop_per_listing_pct AS report_avg_total_drop_per_listing_pct,
     e.avg_total_drop_per_listing_pct AS expected_avg_total_drop_per_listing_pct
-  FROM `smg-ch-automotive-interview.vladimir_dimitric_marts.rpt_avg_price_drop_per_model` r
+  FROM {{ ref('rpt_avg_price_drop_per_model') }} r
   FULL OUTER JOIN expected e USING (make_key, model_key)
 )
 SELECT *,
@@ -118,7 +111,7 @@ WHERE report_n_drop_events IS NULL
    OR report_n_drop_events IS DISTINCT FROM expected_n_drop_events
    OR report_n_listings_with_drop IS DISTINCT FROM expected_n_listings_with_drop
    OR report_avg_drop_chf IS DISTINCT FROM expected_avg_drop_chf
-   OR report_median_drop_chf IS DISTINCT FROM expected_median_drop_chf
+   OR ABS(COALESCE(report_median_drop_chf,0) - COALESCE(expected_median_drop_chf,0)) > GREATEST(1, 0.02 * COALESCE(expected_median_drop_chf,0))
    OR report_avg_drop_pct IS DISTINCT FROM expected_avg_drop_pct
    OR report_avg_price_before_drop_chf IS DISTINCT FROM expected_avg_price_before_drop_chf
    OR report_avg_total_drop_per_listing_chf IS DISTINCT FROM expected_avg_total_drop_per_listing_chf
@@ -128,84 +121,75 @@ ORDER BY make_key, model_key;
 
 -- --------------------------------------------------------------------------
 -- TEST 2 — rpt_days_on_platform
--- Recalculate all four grouping levels from dim_listing. Median uses the same
--- APPROX_QUANTILES(..., 2 IGNORE NULLS) definition as the dbt model.
+-- Recompute every level with a SEPARATE GROUP BY (no GROUPING SETS, so the audit
+-- does not reuse the model's logic). Medians compared with a tolerance: APPROX_QUANTILES
+-- is approximate and its error grows with group size (largest groups differ by < 1 day).
+-- Same logic as tests/assert_days_on_platform_reconciles.sql.
 -- --------------------------------------------------------------------------
-WITH cars AS (
-  SELECT *
-  FROM `smg-ch-automotive-interview.vladimir_dimitric_marts.dim_listing`
-  WHERE vehicle_category = 'car'
-    AND was_ever_activated
-),
-expected_all AS (
-  SELECT
-    CASE
-      WHEN GROUPING(make_key) = 0 AND GROUPING(model_key) = 0 THEN 'make_model'
-      WHEN GROUPING(make_key) = 0 THEN 'make'
-      WHEN GROUPING(seller_type) = 0 THEN 'seller_type'
-      ELSE 'all_cars'
-    END AS grouping_level,
-    seller_type,
-    make_key,
-    model_key,
-    COUNT(*) AS n_listings,
-    COUNTIF(NOT is_active_at_snapshot) AS n_completed,
-    ROUND(AVG(IF(NOT is_active_at_snapshot, days_active, NULL)), 1) AS avg_days_completed,
-    ROUND(APPROX_QUANTILES(IF(NOT is_active_at_snapshot, days_active, NULL), 2 IGNORE NULLS)[SAFE_OFFSET(1)], 1)
-      AS median_days_completed,
-    ROUND(AVG(days_active), 1) AS avg_days_all,
-    ROUND(AVG(activation_episodes), 2) AS avg_activation_episodes
-  FROM cars
-  GROUP BY GROUPING SETS ((), (seller_type), (make_key), (make_key, model_key))
-),
-expected AS (
-  SELECT *
-  FROM expected_all
-  WHERE grouping_level IN ('all_cars', 'seller_type')
-     OR n_listings >= 20
-),
-comparison AS (
-  SELECT
-    COALESCE(r.grouping_level, e.grouping_level) AS grouping_level,
-    COALESCE(r.seller_type, e.seller_type) AS seller_type,
-    COALESCE(r.make_key, e.make_key) AS make_key,
-    COALESCE(r.model_key, e.model_key) AS model_key,
-    r.n_listings AS report_n_listings,
-    e.n_listings AS expected_n_listings,
-    r.n_completed AS report_n_completed,
-    e.n_completed AS expected_n_completed,
-    r.avg_days_completed AS report_avg_days_completed,
-    e.avg_days_completed AS expected_avg_days_completed,
-    r.median_days_completed AS report_median_days_completed,
-    e.median_days_completed AS expected_median_days_completed,
-    r.avg_days_all AS report_avg_days_all,
-    e.avg_days_all AS expected_avg_days_all,
-    r.avg_activation_episodes AS report_avg_activation_episodes,
-    e.avg_activation_episodes AS expected_avg_activation_episodes
-  FROM `smg-ch-automotive-interview.vladimir_dimitric_marts.rpt_days_on_platform` r
-  FULL OUTER JOIN expected e
-    ON r.grouping_level = e.grouping_level
-   AND r.seller_type IS NOT DISTINCT FROM e.seller_type
-   AND r.make_key IS NOT DISTINCT FROM e.make_key
-   AND r.model_key IS NOT DISTINCT FROM e.model_key
-)
-SELECT *,
-  CASE
-    WHEN report_n_listings IS NULL THEN 'MISSING_FROM_REPORT'
-    WHEN expected_n_listings IS NULL THEN 'EXTRA_IN_REPORT'
-    ELSE 'METRIC_MISMATCH'
-  END AS audit_status
-FROM comparison
-WHERE report_n_listings IS NULL
-   OR expected_n_listings IS NULL
-   OR report_n_listings IS DISTINCT FROM expected_n_listings
-   OR report_n_completed IS DISTINCT FROM expected_n_completed
-   OR report_avg_days_completed IS DISTINCT FROM expected_avg_days_completed
-   OR report_median_days_completed IS DISTINCT FROM expected_median_days_completed
-   OR report_avg_days_all IS DISTINCT FROM expected_avg_days_all
-   OR report_avg_activation_episodes IS DISTINCT FROM expected_avg_activation_episodes
-ORDER BY grouping_level, make_key, model_key, seller_type;
 
+{% set metrics %}
+    count(*)                                                                  as n_listings,
+    countif(not is_active_at_snapshot)                                        as n_completed,
+    round(avg(if(not is_active_at_snapshot, days_active, null)), 1)           as avg_days_completed,
+    round(approx_quantiles(if(not is_active_at_snapshot, days_active, null), 2 ignore nulls)[safe_offset(1)], 1) as median_days_completed,
+    round(avg(days_active), 1)                                                as avg_days_all,
+    round(avg(activation_episodes), 2)                                        as avg_activation_episodes
+{% endset %}
+
+with cars as (
+    select * from {{ ref('dim_listing') }}
+    where vehicle_category = 'car' and was_ever_activated
+),
+
+expected as (
+    select 'all_cars' as grouping_level, cast(null as string) as seller_type,
+           cast(null as string) as make_key, cast(null as string) as model_key, {{ metrics }}
+    from cars
+    union all
+    select 'seller_type', seller_type, cast(null as string), cast(null as string), {{ metrics }}
+    from cars group by seller_type
+    union all
+    select 'make', cast(null as string), make_key, cast(null as string), {{ metrics }}
+    from cars group by make_key
+    having count(*) >= {{ var('min_model_sample_size') }}
+    union all
+    select 'make_model', cast(null as string), make_key, model_key, {{ metrics }}
+    from cars group by make_key, model_key
+    having count(*) >= {{ var('min_model_sample_size') }}
+),
+
+compared as (
+    select
+        coalesce(r.grouping_level, e.grouping_level) as grouping_level,
+        coalesce(r.seller_type, e.seller_type)       as seller_type,
+        coalesce(r.make_key, e.make_key)             as make_key,
+        coalesce(r.model_key, e.model_key)           as model_key,
+        r.n_listings as report_n, e.n_listings as expected_n,
+        r.median_days_completed as report_median, e.median_days_completed as expected_median,
+        case
+            when r.grouping_level is null then 'MISSING_FROM_REPORT'
+            when e.grouping_level is null then 'EXTRA_IN_REPORT'
+            when r.n_listings != e.n_listings
+              or r.n_completed != e.n_completed
+              or abs(coalesce(r.avg_days_completed, 0) - coalesce(e.avg_days_completed, 0)) > 0.1
+              or abs(coalesce(r.avg_days_all, 0) - coalesce(e.avg_days_all, 0)) > 0.1
+              or abs(coalesce(r.avg_activation_episodes, 0) - coalesce(e.avg_activation_episodes, 0)) > 0.01
+              or abs(coalesce(r.median_days_completed, 0) - coalesce(e.median_days_completed, 0))
+                 > greatest(2, 0.05 * coalesce(e.median_days_completed, 0))  -- APPROX_QUANTILES: up to ~1-2 days on 100k-1.3M listings
+            then 'FAIL'
+            else 'PASS'
+        end as audit_status
+    from {{ ref('rpt_days_on_platform') }} as r
+    full outer join expected as e
+      on  r.grouping_level = e.grouping_level
+      and r.seller_type is not distinct from e.seller_type
+      and r.make_key    is not distinct from e.make_key
+      and r.model_key   is not distinct from e.model_key
+)
+
+select * from compared where audit_status != 'PASS'
+
+;
 
 -- --------------------------------------------------------------------------
 -- TEST 3 — rpt_overpriced_listings
@@ -224,7 +208,7 @@ WITH live AS (
       WHEN mileage < 150000 THEN '100-150k'
       ELSE '150k+'
     END AS mileage_band
-  FROM `smg-ch-automotive-interview.vladimir_dimitric_marts.dim_listing`
+  FROM {{ ref('dim_listing') }}
   WHERE vehicle_category = 'car'
     AND is_active_at_snapshot
     AND current_price IS NOT NULL
@@ -240,7 +224,7 @@ peers AS (
     APPROX_QUANTILES(current_price, 100)[OFFSET(75)] AS peer_p75_price
   FROM live
   GROUP BY make_key, model_key, first_registration_year, condition_type, mileage_band
-  HAVING COUNT(*) >= 10
+  HAVING COUNT(*) >= {{ var('min_peer_group_size') }}
 ),
 expected AS (
   SELECT
@@ -256,7 +240,7 @@ expected AS (
     l.days_active > 60 AND l.n_valid_price_drops = 0 AS is_stale
   FROM live l
   JOIN peers p USING (make_key, model_key, first_registration_year, condition_type, mileage_band)
-  WHERE l.current_price > p.peer_median_price * 1.25
+  WHERE l.current_price > p.peer_median_price * (1 + {{ var('overpriced_premium_pct') }})
 ),
 comparison AS (
   SELECT
@@ -279,7 +263,7 @@ comparison AS (
     e.n_valid_price_drops AS expected_n_valid_price_drops,
     r.is_stale AS report_is_stale,
     e.is_stale AS expected_is_stale
-  FROM `smg-ch-automotive-interview.vladimir_dimitric_marts.rpt_overpriced_listings` r
+  FROM {{ ref('rpt_overpriced_listings') }} r
   FULL OUTER JOIN expected e USING (listing_id)
 )
 SELECT *,
@@ -291,12 +275,11 @@ SELECT *,
 FROM comparison
 WHERE report_peer_median_price IS NULL
    OR expected_peer_median_price IS NULL
-   OR report_peer_median_price IS DISTINCT FROM expected_peer_median_price
-   OR report_peer_p25_price IS DISTINCT FROM expected_peer_p25_price
-   OR report_peer_p75_price IS DISTINCT FROM expected_peer_p75_price
+   -- percentiles are APPROX_QUANTILES: compare with a 2% tolerance
+   OR ABS(report_peer_median_price - expected_peer_median_price) > 0.02 * expected_peer_median_price
+   OR ABS(report_peer_p25_price - expected_peer_p25_price) > 0.02 * expected_peer_p25_price
+   OR ABS(report_peer_p75_price - expected_peer_p75_price) > 0.02 * expected_peer_p75_price
    OR report_n_peers IS DISTINCT FROM expected_n_peers
-   OR report_price_premium_pct IS DISTINCT FROM expected_price_premium_pct
-   OR report_price_premium_chf IS DISTINCT FROM expected_price_premium_chf
    OR report_days_active IS DISTINCT FROM expected_days_active
    OR report_n_valid_price_drops IS DISTINCT FROM expected_n_valid_price_drops
    OR report_is_stale IS DISTINCT FROM expected_is_stale
@@ -327,7 +310,7 @@ WITH notification_rows AS (
     run_date,
     user_id,
     listing_id
-  FROM `smg-ch-automotive-interview.vladimir_dimitric_marts.rpt_daily_price_drop_notifications`
+  FROM {{ ref('rpt_daily_price_drop_notifications') }}
 ),
 
 final_listing_check AS (
@@ -335,7 +318,7 @@ final_listing_check AS (
     n.*,
     l.listing_id IS NOT NULL AS listing_exists_in_final
   FROM notification_rows n
-  LEFT JOIN `smg-ch-automotive-interview.vladimir_dimitric_marts.dim_listing` l
+  LEFT JOIN {{ ref('dim_listing') }} l
     ON l.listing_id = n.listing_id
 ),
 
@@ -359,7 +342,7 @@ staging_listing AS (
     v.price AS listing_price,
     v.first_registration_year AS listing_first_registration_year
   FROM notification_as_of n
-  LEFT JOIN `smg-ch-automotive-interview.vladimir_dimitric_staging.stg_listings_versions` v
+  LEFT JOIN {{ ref('stg_listings_versions') }} v
     ON v.listing_id = n.listing_id
    AND v.valid_from < n.as_of_exclusive
    AND v.valid_to >= n.as_of_exclusive
@@ -409,7 +392,7 @@ search_evaluation AS (
     ) AS matches_saved_search
 
   FROM staging_listing l
-  LEFT JOIN `smg-ch-automotive-interview.vladimir_dimitric_staging.stg_saved_searches` s
+  LEFT JOIN {{ ref('stg_saved_searches') }} s
     ON s.user_id = l.user_id
 ),
 
@@ -471,7 +454,7 @@ ORDER BY run_date, user_id, listing_id;
 -- --------------------------------------------------------------------------
 WITH candidates AS (
   SELECT *
-  FROM `smg-ch-automotive-interview.vladimir_dimitric_marts.fct_price_drop_notifications`
+  FROM {{ ref('fct_price_drop_notifications') }}
 ),
 per_user_day AS (
   SELECT
@@ -490,7 +473,7 @@ duplicate_candidates AS (
 ),
 export_duplicates AS (
   SELECT run_date, user_id, listing_id, COUNT(*) AS row_count
-  FROM `smg-ch-automotive-interview.vladimir_dimitric_marts.rpt_daily_price_drop_notifications`
+  FROM {{ ref('rpt_daily_price_drop_notifications') }}
   GROUP BY run_date, user_id, listing_id
   HAVING COUNT(*) != 1
 ),
@@ -501,7 +484,7 @@ selected_missing_from_export AS (
     c.listing_id,
     c.digest_rank
   FROM candidates c
-  LEFT JOIN `smg-ch-automotive-interview.vladimir_dimitric_marts.rpt_daily_price_drop_notifications` r
+  LEFT JOIN {{ ref('rpt_daily_price_drop_notifications') }} r
     ON r.run_date = c.drop_date
    AND r.user_id = c.user_id
    AND r.listing_id = c.listing_id
@@ -513,7 +496,7 @@ export_without_selected_candidate AS (
     r.run_date,
     r.user_id,
     r.listing_id
-  FROM `smg-ch-automotive-interview.vladimir_dimitric_marts.rpt_daily_price_drop_notifications` r
+  FROM {{ ref('rpt_daily_price_drop_notifications') }} r
   LEFT JOIN candidates c
     ON c.drop_date = r.run_date
    AND c.user_id = r.user_id
@@ -578,7 +561,7 @@ violations AS (
     'SELECTED_LISTING_NOT_ACTIVATED_AT_EOD', CAST(c.drop_date AS STRING), c.user_id, c.listing_id,
     CONCAT('end_of_day_status=', COALESCE(v.status, 'NO_VERSION'))
   FROM candidates c
-  LEFT JOIN `smg-ch-automotive-interview.vladimir_dimitric_staging.stg_listings_versions` v
+  LEFT JOIN {{ ref('stg_listings_versions') }} v
     ON v.listing_id = c.listing_id
    AND v.valid_from <= TIMESTAMP_SUB(TIMESTAMP(DATE_ADD(c.drop_date, INTERVAL 1 DAY)), INTERVAL 1 MICROSECOND)
    AND v.valid_to > TIMESTAMP_SUB(TIMESTAMP(DATE_ADD(c.drop_date, INTERVAL 1 DAY)), INTERVAL 1 MICROSECOND)

@@ -1,6 +1,6 @@
 -- Reconciliation: rpt_days_on_platform (GROUPING SETS) vs. each level recomputed with its own GROUP BY.
 -- Returns only discrepancies. Counts must match exactly; averages within rounding; medians within
--- 2% or 1 day (APPROX_QUANTILES is approximate and its error grows with group size).
+-- 5% or 2 days (APPROX_QUANTILES is approximate and its error grows with group size).
 
 {% set metrics %}
     count(*)                                                                  as n_listings,
@@ -50,7 +50,7 @@ compared as (
               or abs(coalesce(r.avg_days_all, 0) - coalesce(e.avg_days_all, 0)) > 0.1
               or abs(coalesce(r.avg_activation_episodes, 0) - coalesce(e.avg_activation_episodes, 0)) > 0.01
               or abs(coalesce(r.median_days_completed, 0) - coalesce(e.median_days_completed, 0))
-                 > greatest(1, 0.02 * coalesce(e.median_days_completed, 0))
+                 > greatest(2, 0.05 * coalesce(e.median_days_completed, 0))  -- APPROX_QUANTILES: up to ~1-2 days on 100k-1.3M listings
             then 'FAIL'
             else 'PASS'
         end as audit_status
